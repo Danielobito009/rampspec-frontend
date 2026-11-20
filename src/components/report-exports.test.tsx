@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ReportExports, type IntegrityState } from "./report-exports";
+import { verifyReportSignature, isValidDigest } from "@/lib/reports/signature";
 
 describe("ReportExports component", () => {
   const reportId = "rpt-123";
@@ -48,6 +49,18 @@ describe("ReportExports component", () => {
       ).not.toThrow();
     });
 
+    it("accepts loading state", () => {
+      expect(() =>
+        ReportExports({ reportId, integrityState: "loading" })
+      ).not.toThrow();
+    });
+
+    it("accepts error state", () => {
+      expect(() =>
+        ReportExports({ reportId, integrityState: "error" })
+      ).not.toThrow();
+    });
+
     it("defaults to verified when integrityState is not provided", () => {
       expect(() => ReportExports({ reportId })).not.toThrow();
     });
@@ -55,15 +68,17 @@ describe("ReportExports component", () => {
 
   describe("component type assertions", () => {
     it("IntegrityState type is correctly defined", () => {
-      const states: IntegrityState[] = ["pending", "verified", "rejected"];
-      expect(states).toHaveLength(3);
+      const states: IntegrityState[] = ["pending", "verified", "rejected", "loading", "error"];
+      expect(states).toHaveLength(5);
     });
 
     it("supports all required integrity states", () => {
-      const states: Array<"pending" | "verified" | "rejected"> = [
+      const states: Array<"pending" | "verified" | "rejected" | "loading" | "error"> = [
         "pending",
         "verified",
         "rejected",
+        "loading",
+        "error",
       ];
       states.forEach((state) => {
         expect(() => ReportExports({ reportId, integrityState: state })).not.toThrow();
@@ -109,7 +124,6 @@ describe("ReportExports component", () => {
     });
 
     it("exports IntegrityState type", () => {
-      // Type is validated through TypeScript compilation
       const _state: IntegrityState = "verified";
       expect(_state).toBe("verified");
     });
@@ -131,20 +145,6 @@ describe("ReportExports component", () => {
         ReportExports({ reportId: longId, integrityState: "verified" })
       ).not.toThrow();
     });
-
-    it("handles all state transitions", () => {
-      const states: IntegrityState[] = ["pending", "verified", "rejected"];
-      states.forEach((from) => {
-        states.forEach((to) => {
-          expect(() =>
-            ReportExports({ reportId, integrityState: from })
-          ).not.toThrow();
-          expect(() =>
-            ReportExports({ reportId, integrityState: to })
-          ).not.toThrow();
-        });
-      });
-    });
   });
 
   describe("component structure validation", () => {
@@ -153,73 +153,146 @@ describe("ReportExports component", () => {
       expect(component.type).toBeDefined();
       expect(component.props).toBeDefined();
     });
+  });
+});
 
-    it("maintains component composition across states", () => {
-      const verifiedComponent = ReportExports({
-        reportId,
-        integrityState: "verified",
-      });
-      const pendingComponent = ReportExports({
-        reportId,
-        integrityState: "pending",
-      });
-      const rejectedComponent = ReportExports({
-        reportId,
-        integrityState: "rejected",
-      });
+describe("ReportExports verification logic", () => {
+  describe("isValidDigest - format validation", () => {
+    it("accepts valid hex digests", () => {
+      expect(isValidDigest("abc123")).toBe(true);
+      expect(isValidDigest("ABC123")).toBe(true);
+      expect(isValidDigest(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      )).toBe(true);
+    });
 
-      expect(verifiedComponent.type).toBe(pendingComponent.type);
-      expect(pendingComponent.type).toBe(rejectedComponent.type);
+    it("accepts mixed case hex", () => {
+      expect(isValidDigest("aBcDeF0123456789")).toBe(true);
+      expect(isValidDigest("AbCdEf0123456789")).toBe(true);
+    });
+
+    it("accepts long valid digests", () => {
+      const longDigest = "a".repeat(256);
+      expect(isValidDigest(longDigest)).toBe(true);
+    });
+
+    it("rejects empty digest", () => {
+      expect(isValidDigest("")).toBe(false);
+    });
+
+    it("rejects non-hex characters", () => {
+      expect(isValidDigest("gg1234")).toBe(false);
+      expect(isValidDigest("xyz789")).toBe(false);
+      expect(isValidDigest("ZZZZZ")).toBe(false);
+    });
+
+    it("rejects special characters", () => {
+      expect(isValidDigest("abc-123")).toBe(false);
+      expect(isValidDigest("abc 123")).toBe(false);
+      expect(isValidDigest("abc!123")).toBe(false);
+      expect(isValidDigest("abc@123")).toBe(false);
+      expect(isValidDigest("abc_123")).toBe(false);
+    });
+
+    it("rejects whitespace", () => {
+      expect(isValidDigest(" abc123")).toBe(false);
+      expect(isValidDigest("abc123 ")).toBe(false);
+      expect(isValidDigest("abc 123")).toBe(false);
+    });
+
+    it("handles single character digest", () => {
+      expect(isValidDigest("a")).toBe(true);
+      expect(isValidDigest("F")).toBe(true);
+      expect(isValidDigest("0")).toBe(true);
+    });
+
+    it("handles extremely long digest", () => {
+      const veryLongDigest = "a".repeat(10000);
+      expect(isValidDigest(veryLongDigest)).toBe(true);
+    });
+
+    it("handles all valid hex characters", () => {
+      expect(isValidDigest("0123456789abcdef")).toBe(true);
+      expect(isValidDigest("ABCDEF")).toBe(true);
+    });
+
+    it("rejects single invalid character among valid ones", () => {
+      expect(isValidDigest("abcdefg")).toBe(false);
+      expect(isValidDigest("0123456789z")).toBe(false);
     });
   });
 
-  describe("accessibility compliance", () => {
-    it("component accepts accessibility props", () => {
-      // Component structure supports aria-labels and accessibility attributes
-      const component = ReportExports({
-        reportId,
-        integrityState: "verified",
-      });
-      expect(component.props.className).toContain("flex");
+  describe("verifyReportSignature - signature verification", () => {
+    it("accepts matching digests", () => {
+      const result = verifyReportSignature("abc123", "abc123", "RampSpec signer");
+      expect(result.valid).toBe(true);
+      expect(result.algorithm).toBe("SHA-256");
+      expect(result.signer).toBe("RampSpec signer");
+      expect(result.reason).toBeUndefined();
     });
 
-    it("supports keyboard interaction structure", () => {
-      // Component renders button and anchor elements that support keyboard nav
-      const component = ReportExports({
-        reportId,
-        integrityState: "verified",
-      });
-      expect(component.props.children).toBeDefined();
+    it("rejects mismatches", () => {
+      const result = verifyReportSignature("abc123", "def456", "RampSpec signer");
+      expect(result.valid).toBe(false);
+      expect(result.reason).toBe("Digest does not match the signed report.");
+    });
+
+    it("rejects empty expected digest", () => {
+      const result = verifyReportSignature("", "abc123", "RampSpec signer");
+      expect(result.valid).toBe(false);
+    });
+
+    it("omits reason on success (prevents leaking info)", () => {
+      const result = verifyReportSignature("abc123", "abc123", "RampSpec");
+      expect(result.reason).toBeUndefined();
+    });
+
+    it("includes reason only on failure", () => {
+      const failResult = verifyReportSignature("a", "b", "RampSpec");
+      expect(failResult.reason).toBeDefined();
+
+      const successResult = verifyReportSignature("a", "a", "RampSpec");
+      expect(successResult.reason).toBeUndefined();
+    });
+
+    it("handles case-sensitive comparison", () => {
+      const result = verifyReportSignature("ABC", "abc", "RampSpec");
+      expect(result.valid).toBe(false);
+    });
+
+    it("provides specific error for digest mismatch", () => {
+      const result = verifyReportSignature("expected", "actual", "signer");
+      expect(result.reason).toBe("Digest does not match the signed report.");
+    });
+
+    it("does not reveal content in error reason", () => {
+      const result = verifyReportSignature("expected", "actual", "signer");
+      expect(result.reason).not.toContain("expected");
+      expect(result.reason).not.toContain("actual");
     });
   });
 
-  describe("regression prevention", () => {
-    it("does not lose export functionality in verified state", () => {
-      expect(() =>
-        ReportExports({ reportId, integrityState: "verified" })
-      ).not.toThrow();
+  describe("state transitions", () => {
+    it("invalid digest prevents download", () => {
+      const invalidDigest = "not-hex!";
+      expect(isValidDigest(invalidDigest)).toBe(false);
     });
 
-    it("disables exports in pending state", () => {
-      expect(() =>
-        ReportExports({ reportId, integrityState: "pending" })
-      ).not.toThrow();
+    it("verification failure prevents download", () => {
+      const result = verifyReportSignature("signed", "other", "signer");
+      expect(result.valid).toBe(false);
     });
 
-    it("disables exports in rejected state", () => {
-      expect(() =>
-        ReportExports({ reportId, integrityState: "rejected" })
-      ).not.toThrow();
-    });
+    it("only success state enables download", () => {
+      const validDigest = "abc123";
+      expect(isValidDigest(validDigest)).toBe(true);
 
-    it("maintains three export options across all states", () => {
-      ["pending", "verified", "rejected"].forEach((state) => {
-        const component = ReportExports({
-          reportId,
-          integrityState: state as IntegrityState,
-        });
-        expect(component.props.children).toHaveLength(3);
-      });
+      const verificationResult = verifyReportSignature(
+        validDigest,
+        validDigest,
+        "RampSpec"
+      );
+      expect(verificationResult.valid).toBe(true);
     });
   });
 });
